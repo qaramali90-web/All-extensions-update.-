@@ -1,0 +1,476 @@
+require "import"
+import "android.widget.*"
+import "android.view.*"
+import "android.media.*"
+import "android.media.audiofx.Equalizer"
+import "java.io.File"
+import "android.content.DialogInterface"
+import "android.content.Context"
+import "android.graphics.Typeface"
+import "android.content.Intent" 
+import "android.net.Uri"
+import "android.provider.Settings"
+import "android.view.accessibility.AccessibilityEvent"
+import "android.text.TextWatcher"
+
+local context = activity or this or service
+
+local function showMessage(text)
+  Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+  pcall(function()
+    local manager = context.getSystemService(Context.ACCESSIBILITY_SERVICE)
+    if manager and manager.isEnabled() then
+      local event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_ANNOUNCEMENT)
+      event.getText().add(text)
+      manager.sendAccessibilityEvent(event)
+    end
+    if service and service.speak then service.speak(text) end
+  end)
+end
+
+layout = {
+  LinearLayout,
+  orientation="vertical",
+  layout_width="fill",
+  layout_height="fill",
+  gravity="center_horizontal",
+  {TextView, text="Music Player", textSize="22sp", layout_gravity="center", layout_marginBottom="5dp"},
+  {TextView, text="Developer: qaramali", textSize="16sp", layout_gravity="center", layout_marginBottom="10dp"},
+  {Button, id="close_btn", text="Close", layout_width="wrap", layout_gravity="center", layout_marginBottom="15dp"},
+  {EditText, id="search_box", hint="Search here...", layout_width="fill", layout_marginLeft="20dp", layout_marginRight="20dp", layout_marginBottom="10dp"},
+  
+  {Button, id="switch_list_btn", text="Audio List", layout_width="fill", layout_marginLeft="20dp", layout_marginRight="20dp", layout_marginBottom="10dp"},
+  {Button, id="more_options_btn", text="More Options", layout_width="fill", layout_marginLeft="20dp", layout_marginRight="20dp", layout_marginBottom="15dp"},
+  
+  {
+    LinearLayout,
+    id="controls_layout",
+    orientation="horizontal",
+    gravity="center",
+    layout_width="fill",
+    layout_marginBottom="15dp",
+    {LinearLayout, id="left_controls", orientation="vertical", visibility=View.GONE, gravity="center",
+      {Button, id="rewind_btn", text="Rewind 10 Second"},
+      {Button, id="previous_btn", text="Previous"}},
+    {Button, id="play_pause_btn", text="Play", layout_width="wrap", layout_marginLeft="10dp", layout_marginRight="10dp"},
+    {LinearLayout, id="right_controls", orientation="vertical", visibility=View.GONE, gravity="center",
+      {Button, id="next_btn", text="Next"},
+      {Button, id="forward_btn", text="Fast Forward 10 Second"}},
+  },
+  
+  {ListView, id="media_list", layout_width="fill", layout_height="0dp", layout_weight="1", layout_marginLeft="10dp", layout_marginRight="10dp", layout_marginBottom="10dp"},
+}
+
+local mediaPlayer = MediaPlayer()
+local eq = nil
+local audioFiles = {}
+local audioNames = {}
+local videoFiles = {}
+local videoNames = {}
+
+local filteredFiles = {}
+local filteredNames = {}
+
+local currentListMode = "audio"
+local currentTrackIndex = 1
+local isStarted = false
+local isAutoPlay = false
+local isRepeat = false
+
+local currentPitch = 1.0
+local currentSpeed = 1.0
+local currentEQPreset = 0
+
+local playMedia
+
+local audioManager = context.getSystemService(Context.AUDIO_SERVICE)
+local focusChangeListener = AudioManager.OnAudioFocusChangeListener{
+  onAudioFocusChange=function(focusChange)
+    if not mediaPlayer then return end
+    if focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK then
+      mediaPlayer.setVolume(0.2, 0.2)
+    elseif focusChange == AudioManager.AUDIOFOCUS_GAIN then
+      mediaPlayer.setVolume(1.0, 1.0)
+    elseif focusChange == AudioManager.AUDIOFOCUS_LOSS then
+      if mediaPlayer.isPlaying() then mediaPlayer.pause() play_pause_btn.setText("Play") end
+    end
+  end
+}
+
+local function stopAndClose()
+  if audioManager and focusChangeListener then audioManager.abandonAudioFocus(focusChangeListener) end
+  if eq then eq.release() eq = nil end
+  if mediaPlayer then
+    if mediaPlayer.isPlaying() then mediaPlayer.stop() end
+    mediaPlayer.release()
+    mediaPlayer = nil
+  end
+  if activity then 
+    activity.finish() 
+  end
+end
+
+local mainDlg = LuaDialog(context).setView(loadlayout(layout))
+mainDlg.setOnDismissListener(DialogInterface.OnDismissListener{onDismiss=function(d) stopAndClose() end})
+mainDlg.show()
+
+playMedia = function(index)
+  if #filteredFiles == 0 or not mediaPlayer then return end
+  if index < 1 then index = #filteredFiles end
+  if index > #filteredFiles then index = 1 end
+  currentTrackIndex = index
+  
+  if audioManager then
+    audioManager.requestAudioFocus(focusChangeListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+  end
+
+  mediaPlayer.reset()
+  mediaPlayer.setDataSource(filteredFiles[currentTrackIndex])
+  mediaPlayer.prepare()
+  
+  if not eq and mediaPlayer.getAudioSessionId() ~= 0 then
+    pcall(function()
+      eq = Equalizer(0, mediaPlayer.getAudioSessionId())
+      eq.setEnabled(true)
+      if currentEQPreset <= eq.getNumberOfPresets() - 1 then
+        eq.usePreset(currentEQPreset)
+      end
+    end)
+  end
+
+  mediaPlayer.setOnCompletionListener(MediaPlayer.OnCompletionListener{
+    onCompletion=function(mp)
+      if isRepeat then
+        playMedia(currentTrackIndex)
+      elseif isAutoPlay then
+        playMedia(currentTrackIndex + 1)
+      else
+        play_pause_btn.setText("Play")
+      end
+    end
+  })
+
+  mediaPlayer.start()
+
+  pcall(function()
+    local params = mediaPlayer.getPlaybackParams()
+    params.setPitch(currentPitch)
+    params.setSpeed(currentSpeed)
+    mediaPlayer.setPlaybackParams(params)
+  end)
+
+  play_pause_btn.setText("Pause")
+  
+  if not isStarted then
+    isStarted = true
+    left_controls.setVisibility(View.VISIBLE)
+    right_controls.setVisibility(View.VISIBLE)
+  end
+end
+
+local function scanMediaFiles()
+  audioFiles, audioNames, videoFiles, videoNames = {}, {}, {}, {}
+  local storagePath = os.getenv("EXTERNAL_STORAGE")
+  if not storagePath then return end
+  
+  local function scan(dir)
+    local files = dir.listFiles()
+    if files then
+      for i=0, #files-1 do
+        local f = files[i]
+        local n = tostring(f.getName())
+        if f.isDirectory() then 
+          if not n:find("^%.") and n ~= "Android" then scan(f) end
+        elseif f.isFile() then
+          local ln = n:lower()
+          if ln:find("%.mp3$") or ln:find("%.wav$") or ln:find("%.m4a$") or ln:find("%.ogg$") then
+            table.insert(audioFiles, f.getAbsolutePath())
+            table.insert(audioNames, n)
+          elseif ln:find("%.mp4$") or ln:find("%.mkv$") or ln:find("%.3gp$") then
+            table.insert(videoFiles, f.getAbsolutePath())
+            table.insert(videoNames, n)
+          end
+        end
+      end
+    end
+  end
+  scan(File(storagePath))
+end
+
+local function filterMediaList(keyword)
+  filteredFiles = {}
+  filteredNames = {}
+  
+  local sourceFiles = currentListMode == "audio" and audioFiles or videoFiles
+  local sourceNames = currentListMode == "audio" and audioNames or videoNames
+  
+  -- کلمہ کی فالتو سپیسز ختم کرنے کے لیے ٹرم لاجک
+  keyword = tostring(keyword):lower():gsub("^%s*(.-)%s*$", "%1")
+  
+  if keyword == "" then
+    if sourceFiles and #sourceFiles > 0 then
+      for i=1, #sourceFiles do
+        table.insert(filteredFiles, sourceFiles[i])
+        table.insert(filteredNames, sourceNames[i])
+      end
+    end
+  else
+    for i=1, #sourceNames do
+      local currentName = tostring(sourceNames[i]):lower()
+      -- یہاں ہم نے چوتھا پیرامیٹر true لگا دیا ہے تاکہ بریکٹس اور ڈیش وغیرہ کا مسئلہ نہ بنے
+      if currentName:find(keyword, 1, true) then
+        table.insert(filteredNames, sourceNames[i])
+        table.insert(filteredFiles, sourceFiles[i])
+      end
+    end
+  end
+  
+  if #filteredNames == 0 then
+    local noFilesMsg = currentListMode == "audio" and "No audio files found" or "No video files found"
+    local adapter = ArrayAdapter(context, android.R.layout.simple_list_item_1, {noFilesMsg})
+    media_list.setAdapter(adapter)
+  else
+    local adapter = ArrayAdapter(context, android.R.layout.simple_list_item_1, filteredNames)
+    media_list.setAdapter(adapter)
+  end
+end
+
+scanMediaFiles()
+
+if currentListMode == "audio" then
+  for i=1, #audioFiles do
+    table.insert(filteredFiles, audioFiles[i])
+    table.insert(filteredNames, audioNames[i])
+  end
+else
+  for i=1, #videoFiles do
+    table.insert(filteredFiles, videoFiles[i])
+    table.insert(filteredNames, videoNames[i])
+  end
+end
+
+filterMediaList("")
+
+search_box.addTextChangedListener(TextWatcher{
+  onTextChanged=function(s, start, before, count)
+    filterMediaList(s)
+  end
+})
+
+local function refreshListView()
+  scanMediaFiles()
+  search_box.setText("")
+  filterMediaList("")
+end
+
+switch_list_btn.onClick=function()
+  if mediaPlayer and mediaPlayer.isPlaying() then
+    mediaPlayer.stop()
+  end
+
+  if currentListMode == "audio" then
+    currentListMode = "video"
+    switch_list_btn.setText("Video List")
+  else
+    currentListMode = "audio"
+    switch_list_btn.setText("Audio List")
+  end
+  
+  search_box.setText("") 
+  filterMediaList("")
+  
+  isStarted = false
+  currentTrackIndex = 1
+  play_pause_btn.setText("Play")
+  left_controls.setVisibility(View.GONE)
+  right_controls.setVisibility(View.GONE)
+  showMessage(currentListMode == "audio" and "Audio List Switching" or "Videos List Switching")
+end
+
+media_list.onItemClick=function(p, v, pos)
+  if #filteredFiles == 0 then return end
+  playMedia(pos+1) 
+end
+
+more_options_btn.onClick=function()
+  local menuLayout = {
+    LinearLayout, orientation="vertical", layout_width="fill", padding="20dp",
+    {TextView, text="More Options", textSize="20sp", typeface=Typeface.DEFAULT_BOLD, layout_gravity="center", layout_marginBottom="15dp"},
+    {Button, id="settings_btn", text="Settings", layout_width="fill"},
+    {Button, id="ringtone_btn", text="Ringtone", layout_width="fill", layout_marginTop="10dp"},
+    {Button, id="delete_btn", text="Delete", layout_width="fill", layout_marginTop="10dp"},
+    {Button, id="about_btn", text="About", layout_width="fill", layout_marginTop="10dp"},
+    {Button, id="menu_back", text="Back", layout_width="fill", layout_marginTop="20dp"},
+  }
+  local menuDlg = LuaDialog(context).setView(loadlayout(menuLayout))
+  menuDlg.show()
+  menu_back.onClick=function() menuDlg.dismiss() end
+
+  ringtone_btn.onClick=function()
+    if currentListMode == "video" then
+      showMessage("Error: Ringtone can only be set for audio files")
+      return
+    end
+    if #filteredFiles == 0 or not filteredFiles[currentTrackIndex] then
+      showMessage("No audio file playing or selected")
+      return
+    end
+    local ringLayout = {
+      LinearLayout, orientation="vertical", padding="20dp",
+      {TextView, text="Do you want to set this audio as your phone Ringtone?", textSize="16sp", layout_marginBottom="20dp"},
+      {LinearLayout, orientation="horizontal", gravity="right", layout_width="fill",
+        {Button, id="ring_cancel", text="Cancel"},
+        {Button, id="ring_ok", text="OK", layout_marginLeft="10dp"}}
+    }
+    local ringDlg = LuaDialog(context).setView(loadlayout(ringLayout))
+    ringDlg.show()
+    ring_cancel.onClick=function() ringDlg.dismiss() end
+    ring_ok.onClick=function()
+      pcall(function()
+        local filePath = filteredFiles[currentTrackIndex]
+        local file = File(filePath)
+        if file.exists() then
+          if Settings.System.canWrite(context) then
+            RingtoneManager.setActualDefaultRingtoneUri(context, RingtoneManager.TYPE_RINGTONE, Uri.fromFile(file))
+            showMessage("Ringtone Set Successfully")
+            ringDlg.dismiss()
+            menuDlg.dismiss()
+          else
+            showMessage("Please allow modify system settings permission")
+            local intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS)
+            intent.setData(Uri.parse("package:" .. context.getPackageName()))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+          end
+        end
+      end)
+    end
+  end
+
+  delete_btn.onClick=function()
+    if #filteredFiles == 0 or not filteredFiles[currentTrackIndex] then
+      showMessage("No file selected to delete")
+      return
+    end
+    local deleteLayout = {
+      LinearLayout, orientation="vertical", padding="20dp",
+      {TextView, text="Are you sure you want to delete this file permanently?", textSize="16sp", layout_marginBottom="20dp"},
+      {LinearLayout, orientation="horizontal", gravity="right", layout_width="fill",
+        {Button, id="del_cancel", text="Cancel"},
+        {Button, id="del_ok", text="OK", layout_marginLeft="10dp"}}
+    }
+    local deleteDlg = LuaDialog(context).setView(loadlayout(deleteLayout))
+    deleteDlg.show()
+    del_cancel.onClick=function() deleteDlg.dismiss() end
+    del_ok.onClick=function()
+      pcall(function()
+        local filePath = filteredFiles[currentTrackIndex]
+        local file = File(filePath)
+        if file.exists() then
+          if mediaPlayer and mediaPlayer.isPlaying() then
+            mediaPlayer.stop()
+            play_pause_btn.setText("Play")
+          end
+          file.delete()
+          showMessage("File Deleted")
+          refreshListView()
+          deleteDlg.dismiss()
+          menuDlg.dismiss()
+        end
+      end)
+    end
+  end
+
+  about_btn.onClick=function()
+    local aboutLayout = {
+      LinearLayout, orientation="vertical", padding="20dp",
+      {TextView, text="Media Player v3.0\nDeveloped by: qaramali\nAll Rights Reserved.", gravity="center", layout_marginBottom="15dp"},
+      {Button, id="whatsapp_btn", text="Join WhatsApp", layout_width="fill"},
+      {Button, id="about_back", text="Back", layout_marginTop="15dp", layout_width="fill"},
+    }
+    local aboutDlg = LuaDialog(context).setView(loadlayout(aboutLayout))
+    aboutDlg.show()
+    about_back.onClick=function() aboutDlg.dismiss() end
+    whatsapp_btn.onClick=function()
+      pcall(function()
+        local url = "https://api.whatsapp.com/send?phone=923260310276"
+        local intent = Intent(Intent.ACTION_VIEW)
+        intent.setData(Uri.parse(url))
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+        showMessage("Opening WhatsApp Chat...")
+      end)
+    end
+  end
+
+  settings_btn.onClick=function()
+    local setLayout = {
+      ScrollView, layout_width="fill",
+      {LinearLayout, orientation="vertical", padding="20dp",
+        {TextView, text="Audio Settings", textSize="18sp", typeface=Typeface.DEFAULT_BOLD, layout_marginBottom="15dp"},
+        {Button, id="pitch_toggle_btn", text="Voice Pitch: " .. tostring(currentPitch), layout_width="fill"},
+        {Button, id="speed_toggle_btn", text="Speech Speed: " .. tostring(currentSpeed), layout_width="fill", layout_marginTop="10dp"},
+        {Button, id="eq_toggle_btn", text="Equalizer Mode: " .. tostring(currentEQPreset), layout_width="fill", layout_marginTop="10dp"},
+        {CheckBox, id="auto_play_cb", text="Auto Play Next", checked=isAutoPlay, layout_marginTop="15dp"},
+        {CheckBox, id="repeat_cb", text="Repeat Mode", checked=isRepeat},
+        {Button, id="set_back", text="Back", layout_marginTop="20dp", layout_width="fill"}}
+    }
+    local setDlg = LuaDialog(context).setView(loadlayout(setLayout))
+    setDlg.show()
+    set_back.onClick=function() setDlg.dismiss() end
+
+    pitch_toggle_btn.onClick=function()
+      currentPitch = currentPitch + 0.1
+      if currentPitch > 1.51 then currentPitch = 1.0 end
+      currentPitch = tonumber(string.format("%.1f", currentPitch))
+      pitch_toggle_btn.setText("Voice Pitch: " .. tostring(currentPitch))
+      showMessage("Pitch " .. tostring(currentPitch))
+      if mediaPlayer and mediaPlayer.isPlaying() then
+        pcall(function() local params = mediaPlayer.getPlaybackParams() params.setPitch(currentPitch) mediaPlayer.setPlaybackParams(params) end)
+      end
+    end
+
+    speed_toggle_btn.onClick=function()
+      currentSpeed = currentSpeed + 0.1
+      if currentSpeed > 1.51 then currentSpeed = 1.0 end
+      currentSpeed = tonumber(string.format("%.1f", currentSpeed))
+      speed_toggle_btn.setText("Speech Speed: " .. tostring(currentSpeed))
+      showMessage("Speed " .. tostring(currentSpeed))
+      if mediaPlayer and mediaPlayer.isPlaying() then
+        pcall(function() local params = mediaPlayer.getPlaybackParams() params.setSpeed(currentSpeed) mediaPlayer.setPlaybackParams(params) end)
+      end
+    end
+
+    eq_toggle_btn.onClick=function()
+      currentEQPreset = currentEQPreset + 1
+      if currentEQPreset > 5 then currentEQPreset = 0 end
+      eq_toggle_btn.setText("Equalizer Mode: " .. tostring(currentEQPreset))
+      showMessage("Equalizer Mode " .. tostring(currentEQPreset))
+      if eq then pcall(function() eq.usePreset(currentEQPreset) end) end
+    end
+
+    auto_play_cb.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(v, c) isAutoPlay = c end})
+    repeat_cb.setOnCheckedChangeListener(CompoundButton.OnCheckedChangeListener{onCheckedChanged=function(v, c) isRepeat = c end})
+  end
+end
+
+play_pause_btn.onClick=function()
+  if #filteredFiles == 0 then return end
+  if not isStarted then 
+    playMedia(currentTrackIndex)
+  else
+    if mediaPlayer and mediaPlayer.isPlaying() then 
+      mediaPlayer.pause() 
+      play_pause_btn.setText("Play")
+    elseif mediaPlayer then 
+      mediaPlayer.start()
+      play_pause_btn.setText("Pause")
+    end
+  end
+end
+
+next_btn.onClick=function() playMedia(currentTrackIndex + 1) end
+previous_btn.onClick=function() playMedia(currentTrackIndex - 1) end
+forward_btn.onClick=function() if mediaPlayer then mediaPlayer.seekTo(mediaPlayer.getCurrentPosition() + 10000) end end
+rewind_btn.onClick=function() if mediaPlayer then mediaPlayer.seekTo(mediaPlayer.getCurrentPosition() - 10000) end end
+close_btn.onClick=function() mainDlg.dismiss() end
