@@ -296,7 +296,8 @@ more_options_btn.onClick=function()
     LinearLayout, orientation="vertical", layout_width="fill", padding="20dp",
     {TextView, text="More Options", textSize="20sp", typeface=Typeface.DEFAULT_BOLD, layout_gravity="center", layout_marginBottom="15dp"},
     {Button, id="settings_btn", text="Settings", layout_width="fill"},
-    {Button, id="ringtone_btn", text="Ringtone", layout_width="fill", layout_marginTop="10dp"},
+    {Button, id="call_ringtone_btn", text="Set Call Ringtone", layout_width="fill", layout_marginTop="10dp"},
+    {Button, id="message_ringtone_btn", text="Set Message Ringtone", layout_width="fill", layout_marginTop="10dp"},
     {Button, id="delete_btn", text="Delete", layout_width="fill", layout_marginTop="10dp"},
     {Button, id="about_btn", text="About", layout_width="fill", layout_marginTop="10dp"},
     {Button, id="menu_back", text="Back", layout_width="fill", layout_marginTop="20dp"},
@@ -305,7 +306,7 @@ more_options_btn.onClick=function()
   menuDlg.show()
   menu_back.onClick=function() menuDlg.dismiss() end
 
-  ringtone_btn.onClick=function()
+  call_ringtone_btn.onClick=function()
     if currentListMode == "video" then
       showMessage("Error: Ringtone can only be set for audio files")
       return
@@ -316,7 +317,7 @@ more_options_btn.onClick=function()
     end
     local ringLayout = {
       LinearLayout, orientation="vertical", padding="20dp",
-      {TextView, text="Do you want to set this audio as your phone Ringtone?", textSize="16sp", layout_marginBottom="20dp"},
+      {TextView, text="Do you want to set this audio as your phone Call Ringtone?", textSize="16sp", layout_marginBottom="20dp"},
       {LinearLayout, orientation="horizontal", gravity="right", layout_width="fill",
         {Button, id="ring_cancel", text="Cancel"},
         {Button, id="ring_ok", text="OK", layout_marginLeft="10dp"}}
@@ -330,8 +331,9 @@ more_options_btn.onClick=function()
         local file = File(filePath)
         if file.exists() then
           if Settings.System.canWrite(context) then
-            RingtoneManager.setActualDefaultRingtoneUri(context, RingtoneManager.TYPE_RINGTONE, Uri.fromFile(file))
-            showMessage("Ringtone Set Successfully")
+            local uri = Uri.fromFile(file)
+            RingtoneManager.setActualDefaultRingtoneUri(context, RingtoneManager.TYPE_RINGTONE, uri)
+            showMessage("Call Ringtone Set Successfully")
             ringDlg.dismiss()
             menuDlg.dismiss()
           else
@@ -341,6 +343,59 @@ more_options_btn.onClick=function()
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
           end
+        end
+      end)
+    end
+  end
+
+  message_ringtone_btn.onClick=function()
+    if currentListMode == "video" then
+      showMessage("Error: Ringtone can only be set for audio files")
+      return
+    end
+    if not isStarted or #filteredFiles == 0 or not filteredFiles[currentTrackIndex] then
+      showMessage("No audio file playing or selected")
+      return
+    end
+    
+    local filePath = filteredFiles[currentTrackIndex]
+    local file = File(filePath)
+    
+    if file.exists() then
+      local fileSize = file.length()
+      if fileSize > 307200 then
+        showMessage("Error: Audio file is too large for message ringtone")
+        return
+      end
+    else
+      showMessage("File does not exist")
+      return
+    end
+
+    local msgRingLayout = {
+      LinearLayout, orientation="vertical", padding="20dp",
+      {TextView, text="Do you want to set this short audio as your Message Ringtone?", textSize="16sp", layout_marginBottom="20dp"},
+      {LinearLayout, orientation="horizontal", gravity="right", layout_width="fill",
+        {Button, id="msg_ring_cancel", text="Cancel"},
+        {Button, id="msg_ring_ok", text="OK", layout_marginLeft="10dp"}}
+    }
+    local msgRingDlg = LuaDialog(context).setView(loadlayout(msgRingLayout))
+    msgRingDlg.show()
+    msg_ring_cancel.onClick=function() msgRingDlg.dismiss() end
+    msg_ring_ok.onClick=function()
+      pcall(function()
+        if Settings.System.canWrite(context) then
+          local uri = Uri.fromFile(file)
+          RingtoneManager.setActualDefaultRingtoneUri(context, RingtoneManager.TYPE_NOTIFICATION, uri)
+          showMessage("Message Ringtone Set Successfully")
+          msgRingDlg.dismiss()
+          menuDlg.dismiss()
+        else
+          showMessage("Please allow modify system settings permission")
+          local intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS)
+          intent.setData(Uri.parse("package:" .. context.getPackageName()))
+          intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          context.startActivity(intent)
         end
       end)
     end
